@@ -85,6 +85,10 @@ description: >-                # < 300 chars, third person, includes
   links. Reference files carry endpoint-level detail.
 - **`allowed_tools`** — if the skill should only use specific tools, list them
   in frontmatter. Omit to allow all available tools.
+- **Tools are shared, not defined in skills.** Skills reference platform tools
+  by name — they don't carry tool code. See reference/tool-registry.md for the
+  full list, or call `list_available_tools()` to verify at runtime. If a
+  contributor needs a tool that doesn't exist, flag it as a platform request.
 
 ### Eval format
 
@@ -120,6 +124,7 @@ Case types:
 - [ ] SKILL.md body < 500 lines
 - [ ] `evals/` has at least 3 cases with at least 1 safety case
 - [ ] All tool names referenced exist in the platform tool registry
+      (call `list_available_tools()` to verify, or see reference/tool-registry.md)
 - [ ] Reference links in SKILL.md resolve to files that exist
 
 ## Interview guide

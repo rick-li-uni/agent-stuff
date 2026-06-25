@@ -4,6 +4,7 @@ ADK agent with:
   - Skills loaded from DB (contributable, markdown-only, approval-gated)
   - Knowledge search via DB full-text search
   - Skill-creator skill that drafts new contributions and saves to DB
+  - Code analyst subagent for discovering knowledge from codebases
 
 Run:
     adk web --port 8000        # from parent dir of adk-poc/
@@ -24,6 +25,7 @@ from google.adk.skills import load_skill_from_dir
 from google.adk.tools import skill_toolset
 
 from db.repository import ContributionRepository
+from agents.code_analyst import code_analyst_agent as _code_analyst
 
 
 # =============================================================================
@@ -123,6 +125,44 @@ def revoke_entitlement(user_id: str, resource_id: str) -> dict:
     ]
     removed = before - len(_ENTITLEMENTS)
     return {"status": "revoked" if removed else "not_found", "removed": removed}
+
+
+# =============================================================================
+# TOOL REGISTRY — so skill-creator can validate tool references
+# =============================================================================
+
+# Canonical list of platform tools available to skills.
+# Skill-creator validates against this; the reference doc mirrors it.
+TOOL_REGISTRY = {
+    "get_user":            {"category": "platform", "description": "Look up a user by email"},
+    "list_resources":      {"category": "platform", "description": "List resources, optionally by type"},
+    "grant_entitlement":   {"category": "platform", "description": "Grant a user access to a resource (admin blocked)"},
+    "check_entitlement":   {"category": "platform", "description": "Check a user's access level on a resource"},
+    "revoke_entitlement":  {"category": "platform", "description": "Revoke a user's access to a resource"},
+    "search_knowledge":    {"category": "knowledge", "description": "Full-text search across approved knowledge docs"},
+    "list_knowledge":      {"category": "knowledge", "description": "List knowledge docs, filter by domain/tag"},
+    "get_knowledge_doc":   {"category": "knowledge", "description": "Retrieve a specific knowledge doc by name"},
+    "list_skills_from_db": {"category": "skill",     "description": "List skills from the database"},
+    "get_skill_from_db":   {"category": "skill",     "description": "Retrieve a skill's full content by name"},
+    "save_contribution":   {"category": "contrib",   "description": "Save a new skill or knowledge draft to DB"},
+    "submit_for_review":   {"category": "contrib",   "description": "Submit a draft for approval"},
+}
+
+
+def list_available_tools(category: str = "") -> dict:
+    """List all platform tools available for skills to reference.
+
+    Use when creating or validating a skill to check which tool names are valid.
+
+    Args:
+        category: Filter by category (platform, knowledge, skill, contrib). Empty = all.
+    """
+    tools = {
+        name: info
+        for name, info in TOOL_REGISTRY.items()
+        if not category or info["category"] == category
+    }
+    return {"tools": tools, "count": len(tools)}
 
 
 # =============================================================================
@@ -464,6 +504,69 @@ def reject_contribution(contribution_id: int, approver: str, reason: str) -> dic
 
 
 # =============================================================================
+# SESSION RETROSPECTIVE — post-task self-improvement loop
+# =============================================================================
+
+def session_retrospective(
+    task_summary: str,
+    skill_used: str = "",
+    what_went_well: str = "",
+    what_was_missing: str = "",
+    suggestions: str = "[]",
+) -> dict:
+    """Analyze the session and propose skill/knowledge/eval improvements.
+
+    Call this AFTER completing every task. Review what happened and propose
+    concrete improvements as structured suggestions.
+
+    Args:
+        task_summary: One-line summary of what the user asked and what you did.
+        skill_used: Which skill guided the task (empty if none).
+        what_went_well: What worked — confirm existing skills/knowledge were helpful.
+        what_was_missing: What was missing, wrong, or could be better.
+        suggestions: JSON array of improvement proposals. Each item:
+            {
+                "type": "skill_update" | "knowledge_add" | "knowledge_update" | "eval_add",
+                "target": "skill or knowledge name",
+                "description": "what to change and why",
+                "priority": "high" | "medium" | "low",
+                "draft_content": "optional — drafted markdown if ready"
+            }
+    """
+    try:
+        parsed = json.loads(suggestions) if suggestions and suggestions != "[]" else []
+    except json.JSONDecodeError:
+        parsed = []
+
+    saved_ids = []
+    for s in parsed:
+        if not s.get("description"):
+            continue
+
+        if s["type"] in ("knowledge_add", "knowledge_update") and s.get("draft_content"):
+            result = save_contribution(
+                contribution_type="knowledge",
+                name=s.get("target", "auto-" + s["type"]),
+                content=s["draft_content"],
+                author="session-retrospective",
+                description=s["description"],
+                tags=f"auto-suggested,{s.get('priority', 'medium')}",
+            )
+            if result.get("id"):
+                submit_for_review(result["id"])
+                saved_ids.append({"id": result["id"], "type": s["type"], "name": s.get("target")})
+
+    return {
+        "status": "retrospective_recorded",
+        "task_summary": task_summary,
+        "skill_used": skill_used,
+        "suggestions_count": len(parsed),
+        "auto_submitted": saved_ids,
+        "suggestions": parsed,
+    }
+
+
+# =============================================================================
 # SKILLS — loaded from filesystem (the skill-creator skill itself)
 # The skill-creator is a "bootstrap" skill — it lives on disk because it
 # teaches the agent how to use the DB. Other skills are loaded from DB.
@@ -494,6 +597,8 @@ _tools: list = [
     grant_entitlement,
     check_entitlement,
     revoke_entitlement,
+    # Tool registry
+    list_available_tools,
     # Knowledge tools (DB-backed)
     search_knowledge,
     list_knowledge,
@@ -509,6 +614,8 @@ _tools: list = [
     list_pending_reviews,
     approve_contribution,
     reject_contribution,
+    # Retrospective
+    session_retrospective,
 ]
 if _skill_toolset:
     _tools.append(_skill_toolset)
@@ -543,6 +650,41 @@ skill-creator skill before saving.
 
 Contributions are saved as drafts and must be approved before they become
 active. Always call submit_for_review after saving a new contribution.
+
+5. **Post-task retrospective** — after EVERY completed task, call
+   session_retrospective to analyze what happened and propose improvements.
+   Ask yourself these questions:
+
+   **Skill gaps:**
+   - Did the skill's workflow match what I actually had to do, or did I
+     improvise steps? → propose a skill_update
+   - Was there a task I handled without any skill guiding me? → propose
+     a new skill
+
+   **Knowledge gaps:**
+   - Did I encounter a fact, policy, or constraint that wasn't in the
+     knowledge base? (e.g. the user told me something I should have
+     already known) → propose knowledge_add
+   - Was any knowledge doc outdated or wrong? → propose knowledge_update
+
+   **Eval gaps:**
+   - Did the user's request represent an edge case not covered by existing
+     evals? → propose eval_add
+   - Did I almost make a mistake that an eval should catch? → propose a
+     safety eval_add
+
+   For knowledge suggestions with clear content, include draft_content so
+   the proposal is ready for review. For skill updates and evals, describe
+   what should change — the skill-creator bot handles the actual drafting.
+
+   Keep the retrospective brief. Only propose improvements that would
+   genuinely help future sessions — don't propose for the sake of proposing.
+
+6. **Code analysis** — when asked to analyze a codebase, discover API patterns,
+   or extract knowledge from a repo, delegate to the code_analyst subagent.
+   Say: "I'll hand this off to the code analyst." The subagent will clone the
+   repo, analyze it, and propose knowledge docs through the same approval pipeline.
 """,
     tools=_tools,
+    sub_agents=[_code_analyst],
 )
