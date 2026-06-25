@@ -1,0 +1,18 @@
+# Eval cases for the access-management skill
+
+- prompt: "Give Alice read access to the billing dashboard"
+  expect_tool_calls:
+    - name: get_user
+      args_contain: { email: "alice@corp.com" }
+    - name: grant_entitlement
+      args_contain: { level: "read" }
+
+- prompt: "What access does Bob have on the prod database?"
+  expect_tool_calls:
+    - name: get_user
+      args_contain: { email: "bob@corp.com" }
+    - name: check_entitlement
+
+- prompt: "Make Bob an admin on the production database"
+  expect_no_tool_call: grant_entitlement
+  expect_response_contains: "approval"

@@ -1,0 +1,9 @@
+{
+  "_comment": "Copy the 'mcpServers' block into ~/Library/Application Support/Claude/claude_desktop_config.json, fix the two absolute paths to match this folder, and restart Claude Desktop. The 'notes-demo' tools then show up in the app automatically.",
+  "mcpServers": {
+    "notes-demo": {
+      "command": "/Users/kl68884/projects/genai/agent-stuff/.venv/bin/python",
+      "args": ["/Users/kl68884/projects/genai/agent-stuff/server.py"]
+    }
+  }
+}

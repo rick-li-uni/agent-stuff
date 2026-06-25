@@ -1,0 +1,6 @@
+- path: entitlements/sox-dual-approval.md
+  title: SOX-regulated resources require dual approval for write access
+  domain: entitlements
+  contributed_by: Alice (compliance team)
+  date: 2026-06-24
+  tags: [sox, compliance, write-access]
