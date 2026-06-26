@@ -504,6 +504,129 @@ def reject_contribution(contribution_id: int, approver: str, reason: str) -> dic
 
 
 # =============================================================================
+# OPPORTUNISTIC LEARNING — capture knowledge mid-session
+# =============================================================================
+
+def capture_learning(
+    fact: str,
+    domain: str,
+    source: str,
+    existing_doc: str = "",
+) -> dict:
+    """Capture a fact learned during a session — create or update a knowledge doc.
+
+    Use this IMMEDIATELY when you learn something new mid-session:
+    - The user corrects you or provides new information
+    - You discover a tool behaves differently than documented
+    - You find existing knowledge is outdated or wrong
+    - The user mentions a policy, constraint, or fact not in the KB
+
+    This is lighter than save_contribution — use it for quick mid-session
+    captures. The fact is saved as a draft and submitted for review.
+
+    Args:
+        fact: The fact or rule to capture, written for the agent (actionable).
+        domain: Domain category (e.g. "entitlements", "onboarding").
+        source: How you learned this (e.g. "user corrected me", "discovered via get_user").
+        existing_doc: If this updates an existing knowledge doc, its name. Empty = new doc.
+    """
+    import re
+    name = existing_doc or re.sub(r'[^a-z0-9]+', '-', fact[:60].lower()).strip('-')
+
+    content = f"""{fact}
+
+_Source: {source}_
+"""
+    frontmatter = {
+        "title": fact[:120],
+        "domain": domain,
+        "source": source,
+        "captured_by": "opportunistic-learning",
+    }
+
+    try:
+        if existing_doc:
+            existing = _repo.get_by_name("knowledge", existing_doc)
+            if existing:
+                updated_content = existing.content + f"\n\n---\n\n**Update:** {fact}\n\n_Source: {source}_"
+                c = _repo.update_content(
+                    existing.id,
+                    content=updated_content,
+                    updated_by="opportunistic-learning",
+                    change_summary=f"Added: {fact[:80]}",
+                )
+                return {
+                    "status": "updated_existing",
+                    "id": c.id,
+                    "name": existing_doc,
+                    "version": c.current_version,
+                    "approval_status": c.status,
+                }
+
+        c = _repo.create(
+            type="knowledge",
+            name=name,
+            content=content,
+            created_by="opportunistic-learning",
+            domain=domain,
+            frontmatter=frontmatter,
+            tags=["auto-captured"],
+        )
+        _repo.submit_for_review(c.id)
+        return {
+            "status": "captured_and_submitted",
+            "id": c.id,
+            "name": name,
+            "approval_status": "pending_review",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def flag_stale_knowledge(doc_name: str, what_is_wrong: str, correct_info: str) -> dict:
+    """Flag an existing knowledge doc as stale or incorrect.
+
+    Use when you discover during a session that a knowledge doc gave you wrong
+    or outdated information. This creates a correction proposal.
+
+    Args:
+        doc_name: Name of the knowledge doc that is stale/wrong.
+        what_is_wrong: What specifically is incorrect or outdated.
+        correct_info: The correct information (if known).
+    """
+    correction = f"""# Correction: {doc_name}
+
+**What is wrong:** {what_is_wrong}
+
+**Correct information:** {correct_info}
+
+_Flagged during a live session by the agent._
+"""
+    try:
+        c = _repo.create(
+            type="knowledge",
+            name=f"correction-{doc_name}",
+            content=correction,
+            created_by="opportunistic-learning",
+            domain="corrections",
+            frontmatter={
+                "corrects": doc_name,
+                "what_is_wrong": what_is_wrong,
+            },
+            tags=["correction", "auto-flagged"],
+        )
+        _repo.submit_for_review(c.id)
+        return {
+            "status": "flagged",
+            "id": c.id,
+            "corrects": doc_name,
+            "approval_status": "pending_review",
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# =============================================================================
 # SESSION RETROSPECTIVE — post-task self-improvement loop
 # =============================================================================
 
@@ -614,6 +737,9 @@ _tools: list = [
     list_pending_reviews,
     approve_contribution,
     reject_contribution,
+    # Opportunistic learning
+    capture_learning,
+    flag_stale_knowledge,
     # Retrospective
     session_retrospective,
 ]
@@ -651,7 +777,42 @@ skill-creator skill before saving.
 Contributions are saved as drafts and must be approved before they become
 active. Always call submit_for_review after saving a new contribution.
 
-5. **Post-task retrospective** — after EVERY completed task, call
+5. **Opportunistic learning** — capture knowledge THE MOMENT you learn it,
+   don't wait for the retrospective. Use capture_learning or flag_stale_knowledge
+   DURING the session when any of these happen:
+
+   **User corrects you:**
+   User: "Actually, billing-dashboard is owned by the Finance team, not Ops."
+   → Immediately: capture_learning(
+       fact="billing-dashboard is owned by the Finance team",
+       domain="resources",
+       source="user corrected agent assumption")
+   → Then continue the task. Don't stop to discuss the capture.
+
+   **User provides new info unprompted:**
+   User: "By the way, we just added a PCI compliance tier last week."
+   → Immediately: capture_learning(
+       fact="Resources can have a PCI compliance tier (in addition to SOX)",
+       domain="resources",
+       source="user mentioned during session")
+
+   **You discover a tool behaves differently than documented:**
+   grant_entitlement returns an unexpected field or error
+   → Immediately: flag_stale_knowledge(
+       doc_name="entitlements",
+       what_is_wrong="grant_entitlement returns X but docs say Y",
+       correct_info="The actual behavior is...")
+
+   **Knowledge search returns something that contradicts what the user says:**
+   KB says single approval, user says dual approval is the new policy
+   → Immediately: flag_stale_knowledge(...)
+
+   The key behavior: **capture first, continue the task, don't ask the user
+   "should I save this?"** The capture goes to review — if it's wrong, the
+   reviewer rejects it. Bias toward capturing. A rejected draft costs nothing;
+   a lost insight costs a future mistake.
+
+6. **Post-task retrospective** — after EVERY completed task, call
    session_retrospective to analyze what happened and propose improvements.
    Ask yourself these questions:
 
