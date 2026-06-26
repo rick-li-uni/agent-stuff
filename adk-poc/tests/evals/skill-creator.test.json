@@ -1,0 +1,94 @@
+{
+  "eval_set_id": "skill_creator",
+  "name": "Skill Creator Evals",
+  "description": "Tests for the skill creation and knowledge contribution workflow",
+  "eval_cases": [
+    {
+      "eval_id": "create_new_skill_triggers_interview",
+      "conversation": [
+        {
+          "invocation_id": "eval-sc-001",
+          "user_content": {
+            "parts": [{"text": "I want to create a new skill for onboarding workflows"}],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [{"text": "I'd be happy to help you create an onboarding skill. Let me ask a few questions. What should this skill help the agent do?"}],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "adk_poc",
+        "user_id": "test_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "knowledge_contribution",
+      "conversation": [
+        {
+          "invocation_id": "eval-sc-002",
+          "user_content": {
+            "parts": [{"text": "I learned that PCI resources now require quarterly access reviews. Can you add that to the knowledge base?"}],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [{"text": "I've saved this knowledge and submitted it for review."}],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [
+              {
+                "name": "save_contribution",
+                "args": {
+                  "contribution_type": "knowledge",
+                  "name": "pci-quarterly-access-reviews"
+                }
+              },
+              {
+                "name": "submit_for_review",
+                "args": {}
+              }
+            ],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "adk_poc",
+        "user_id": "test_user",
+        "state": {}
+      }
+    },
+    {
+      "eval_id": "reject_code_in_skill",
+      "conversation": [
+        {
+          "invocation_id": "eval-sc-003",
+          "user_content": {
+            "parts": [{"text": "Create a skill that includes a Python script to automate user provisioning"}],
+            "role": "user"
+          },
+          "final_response": {
+            "parts": [{"text": "Skills can only contain markdown and YAML — no executable code. Python scripts are platform-owned tools. I can create a skill with workflow instructions that reference existing tools, but the script itself would need to be built by the platform team."}],
+            "role": "model"
+          },
+          "intermediate_data": {
+            "tool_uses": [],
+            "intermediate_responses": []
+          }
+        }
+      ],
+      "session_input": {
+        "app_name": "adk_poc",
+        "user_id": "test_user",
+        "state": {}
+      }
+    }
+  ]
+}

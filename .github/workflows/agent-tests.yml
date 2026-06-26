@@ -1,0 +1,168 @@
+name: Agent Tests
+
+on:
+  pull_request:
+    paths:
+      - 'adk-poc/**'
+  push:
+    branches: [main]
+    paths:
+      - 'adk-poc/**'
+
+jobs:
+  # ── Level 1: Unit tests (no LLM, no DB, fast) ──────────────────────
+  unit-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install google-adk psycopg[binary] pyyaml pytest
+
+      - name: Run unit tests
+        working-directory: adk-poc
+        run: pytest tests/test_tools.py -v
+
+  # ── Level 2: Agent evals (LLM-powered, checks tool trajectory) ─────
+  agent-evals:
+    runs-on: ubuntu-latest
+    needs: unit-tests  # only run if unit tests pass
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install google-adk psycopg[binary] pyyaml pytest pytest-asyncio
+
+      - name: Run agent evals
+        working-directory: adk-poc
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        run: pytest tests/test_agent_eval.py -v
+
+  # ── Level 3: Skill/knowledge contribution validation ────────────────
+  contribution-gate:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No-code check
+        run: |
+          # Fail if any contributed skill/knowledge contains executable files
+          VIOLATIONS=$(find adk-poc/skills adk-poc/knowledge -type f \
+            \( -name "*.py" -o -name "*.js" -o -name "*.ts" -o -name "*.sh" \
+               -o -name "*.rb" -o -name "*.go" -o -name "*.rs" -o -name "*.java" \) \
+            2>/dev/null || true)
+          if [ -n "$VIOLATIONS" ]; then
+            echo "❌ Executable files found in skills/knowledge directories:"
+            echo "$VIOLATIONS"
+            echo "Skills and knowledge must be markdown/YAML only."
+            exit 1
+          fi
+          echo "✅ No executable files in skills/knowledge"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install pyyaml
+
+      - name: Validate skill frontmatter
+        run: |
+          python3 - <<'PYEOF'
+          import yaml, sys, pathlib
+
+          errors = []
+          for skill_md in pathlib.Path("adk-poc/skills").rglob("SKILL.md"):
+              content = skill_md.read_text()
+              if not content.startswith("---"):
+                  errors.append(f"{skill_md}: missing YAML frontmatter")
+                  continue
+
+              parts = content.split("---", 2)
+              if len(parts) < 3:
+                  errors.append(f"{skill_md}: malformed frontmatter")
+                  continue
+
+              try:
+                  fm = yaml.safe_load(parts[1])
+              except yaml.YAMLError as e:
+                  errors.append(f"{skill_md}: invalid YAML: {e}")
+                  continue
+
+              if not fm.get("name"):
+                  errors.append(f"{skill_md}: missing 'name' in frontmatter")
+              elif len(fm["name"]) > 64:
+                  errors.append(f"{skill_md}: name exceeds 64 chars")
+
+              if not fm.get("description"):
+                  errors.append(f"{skill_md}: missing 'description' in frontmatter")
+              elif len(fm["description"]) > 300:
+                  errors.append(f"{skill_md}: description exceeds 300 chars")
+
+              body = parts[2].strip()
+              if body.count("\n") > 500:
+                  errors.append(f"{skill_md}: body exceeds 500 lines")
+
+          if errors:
+              print("❌ Skill validation failed:")
+              for e in errors:
+                  print(f"  - {e}")
+              sys.exit(1)
+          else:
+              print("✅ All skills pass frontmatter validation")
+          PYEOF
+
+      - name: Check eval coverage
+        run: |
+          python3 - <<'PYEOF'
+          import pathlib, yaml, json, sys
+
+          errors = []
+          for skill_dir in pathlib.Path("adk-poc/skills").iterdir():
+              if not skill_dir.is_dir():
+                  continue
+              skill_md = skill_dir / "SKILL.md"
+              if not skill_md.exists():
+                  continue
+
+              # skill-creator is a meta-skill, exempt from eval requirement
+              if skill_dir.name == "skill-creator":
+                  continue
+
+              evals_dir = skill_dir / "evals"
+              if not evals_dir.exists() or not list(evals_dir.glob("*.yaml")):
+                  errors.append(f"{skill_dir.name}: missing evals/ directory or no .yaml files")
+                  continue
+
+              total_cases = 0
+              safety_cases = 0
+              for eval_file in evals_dir.glob("*.yaml"):
+                  cases = yaml.safe_load(eval_file.read_text()) or []
+                  total_cases += len(cases)
+                  for case in cases:
+                      if case.get("expect_no_tool_call") or case.get("expect_refusal"):
+                          safety_cases += 1
+
+              if total_cases < 3:
+                  errors.append(f"{skill_dir.name}: only {total_cases} eval cases (minimum 3)")
+              if safety_cases < 1:
+                  errors.append(f"{skill_dir.name}: no safety/refusal eval cases (minimum 1)")
+
+          if errors:
+              print("❌ Eval coverage check failed:")
+              for e in errors:
+                  print(f"  - {e}")
+              sys.exit(1)
+          else:
+              print("✅ All skills have sufficient eval coverage")
+          PYEOF
